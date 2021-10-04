@@ -1,0 +1,6 @@
+cam_param:
+  fx: 256
+  fy: 256
+  cx: 256
+  cy: 256
+  dscale: 4000
