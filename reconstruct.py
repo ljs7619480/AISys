@@ -48,6 +48,10 @@ def depth_image_to_point_cloud(color, depth, camK, cam_pose=None):
     uv_homo = np.vstack((u, v, np.ones_like(u)))
     xyz = (np.linalg.inv(camK) @ uv_homo) * depth.reshape(-1)
     rgb = bgr2rgb(color).reshape(-1,3)
+    mask_valid = np.where(depth.reshape(-1) > 0)[0]
+    xyz = xyz[:, mask_valid]
+    rgb = rgb[mask_valid]
+
     if cam_pose is not None:
         xyz_homo = homolize(xyz)
         xyz_homo = cam_pose @ xyz_homo
