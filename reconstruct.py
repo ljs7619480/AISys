@@ -1,4 +1,4 @@
-import argparse, os, yaml
+import argparse, os, yaml, pickle
 
 import cv2
 import math3d as m3d
@@ -141,7 +141,7 @@ def get_args():
     parser.add_argument('--sample_idx', type=int)
     parser.add_argument('--keep_roof', action="store_true")
     parser.add_argument('--voxel_size', default=0.03, type=float)
-    parser.add_argument('--cache_pcd', action="store_true", type=bool)
+    parser.add_argument('--cache_pcd', action="store_true")
     
     return parser.parse_args()
 
@@ -183,6 +183,9 @@ if __name__ == "__main__":
         if args.cache_pcd:
             o3d.io.write_point_cloud(cache_path, pcd)
     
+    with open('esti_pose.pickle', 'wb') as f:
+        pickle.dump(esti_pose, f)
+
     # crop roof
     pcd = pcd.voxel_down_sample(args.voxel_size)
     if not args.keep_roof:
