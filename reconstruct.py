@@ -3,6 +3,7 @@ import argparse, os, yaml, pickle
 import cv2
 import math3d as m3d
 import numpy as np
+from sklearn.neighbors import NearestNeighbors
 import open3d as o3d
 from tqdm import tqdm
 
@@ -74,34 +75,48 @@ def depth_image_to_point_cloud(color, depth, camK):
     return xyz, rgb
 
 
-# To Be Done
-# def __local_icp_algorithm(src_pts, tgt_pts, init_tran):
-#     src_pts = homolize(src_pts)
-#     src_pts = init_tran @ src_pts
-#     src_pts = dehomolize(src_pts)
+def __icp_inner(src_pts, tgt_pts):
+    mu_src = np.mean(src_pts, axis=1, keepdims=True)
+    mu_tgt = np.mean(tgt_pts, axis=1, keepdims=True)
+    W = tgt_pts @ src_pts.T
+    u, s, vh = np.linalg.svd(W)
+    rot = u @ vh
+    vec = mu_tgt - (rot @ mu_src)
 
-#     mu_src = np.mean(src_pts, axis=1)
-#     mu_tgt = np.mean(tgt_pts, axis=1)
-#     W = src_pts @ tgt_pts.T
-#     u, s, vh = np.linalg.svd(W)
-#     rot = u @ vh
-#     vec = mu_src - (rot @ mu_tgt)
+    tran = np.eye(4)
+    tran[:3, :3] = rot
+    tran[:3, 3:] = vec
 
-#     tran = np.eye(4)
-#     tran[:3, :3] = rot
-#     tran[:3, 3:] = vec
-
-#     return tran
+    return tran
 
 
-def estimate_transform(pcd_src, pcd_tgt, voxel_size):
-    pcd_src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcd_src.T))
-    pcd_tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcd_tgt.T))
-    pcd_src = pcd_src.voxel_down_sample(0.03)
-    pcd_tgt = pcd_tgt.voxel_down_sample(0.03)
-    
+def local_icp_algorithm(src_pts, tgt_pts, init_tran, max_pair_dist, max_itr=10, threshold=1e-6):
+    tran = init_tran
+    for _ in range(max_itr):
+        src_pts_t = transform(tran, src_pts)
+        nbrs = NearestNeighbors(n_neighbors=1, algorithm='auto').fit(tgt_pts.T)
+        dist, tgt_idx = nbrs.kneighbors(src_pts_t.T, n_neighbors=1, return_distance=True)
+        tgt_near = tgt_pts[:,tgt_idx.reshape(-1)]
+        error = np.mean(np.linalg.norm(src_pts_t - tgt_near, axis=0))
+        if error <= threshold:
+            break
+        valid_pair = np.where(dist.reshape(-1) < max_pair_dist)[0]
+        tran = __icp_inner(src_pts_t[:, valid_pair], tgt_near[:, valid_pair]) @ tran
+
+    return tran
+
+
+def estimate_transform(xyz_src, xyz_tgt, voxel_size):
+    pcd_src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz_src.T))
+    pcd_tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz_tgt.T))
+    pcd_src = pcd_src.voxel_down_sample(voxel_size)
+    pcd_tgt = pcd_tgt.voxel_down_sample(voxel_size)
+    xyz_src = np.asarray(pcd_src.points).T
+    xyz_tgt = np.asarray(pcd_tgt.points).T
+
     pose = global_ransac_registration(pcd_src, pcd_tgt, voxel_size)
-    transform = local_icp_registration(pcd_src, pcd_tgt, pose, voxel_size*10)
+    transform = local_icp_algorithm(xyz_src, xyz_tgt, pose, voxel_size*10) # My implementation
+    # transform = local_icp_registration(pcd_src, pcd_tgt, pose, voxel_size*10) # open3d implementation
     
     return transform
 
@@ -132,6 +147,17 @@ def pose2lineset(poses, color, y=None):
     lineset = lineset.paint_uniform_color(np.array(color, dtype=float).T)
 
     return lineset
+
+
+def pcd_intergration(points, voxel_size):
+    for i in tqdm(range(len(points)), desc="Transform points", ncols=80):
+        points[i] = transform(esti_pose[i], points[i])
+    points = np.hstack(points).T
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+    pcd.colors = o3d.utility.Vector3dVector(np.vstack(colors))
+    pcd = pcd.voxel_down_sample(voxel_size)
+
+    return pcd
 
 
 def get_args():
@@ -174,20 +200,11 @@ if __name__ == "__main__":
     if os.path.exists(cache_path):
         pcd = o3d.io.read_point_cloud(cache_path)
     else:
-        for i in tqdm(range(len(points)), desc="Transform points", ncols=80):
-            points[i] = transform(gt_pose[i], points[i])
-        points = np.hstack(points).T
-        # points = np.vstack([transform(pose, xyz).T for pose, xyz in zip(gt_pose, points)])
-        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
-        pcd.colors = o3d.utility.Vector3dVector(np.vstack(colors))
+        pcd = pcd_intergration(points, args.voxel_size)
         if args.cache_pcd:
             o3d.io.write_point_cloud(cache_path, pcd)
-    
-    with open('esti_pose.pickle', 'wb') as f:
-        pickle.dump(esti_pose, f)
 
-    # crop roof
-    pcd = pcd.voxel_down_sample(args.voxel_size)
+    # remove roof
     if not args.keep_roof:
         bbox = o3d.geometry.AxisAlignedBoundingBox(np.array([-50, -2, -50]).T, np.array([50, 0.6, 50]).T)
         pcd = pcd.crop(bbox)
